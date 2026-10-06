@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ENV_FILE="${1:-.env}"
+EXAMPLE_FILE="${2:-.env.example}"
+
+[[ -f "$ENV_FILE" ]] || {
+    echo "Error: $ENV_FILE not found" >&2
+    exit 1
+}
+
+[[ -f "$EXAMPLE_FILE" ]] || {
+    echo "Error: $EXAMPLE_FILE not found" >&2
+    exit 1
+}
+
+tmp="$(mktemp)"
+trap 'rm -f "$tmp"' EXIT
+
+# Extract valid variable names from .env
+mapfile -t env_keys < <(
+    sed -nE \
+        -e 's/^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=.*/\2/p' \
+        "$ENV_FILE" |
+    sort -u
+)
+
+# Build a lookup table.
+declare -A keys=()
+for key in "${env_keys[@]}"; do
+    keys["$key"]=1
+done
+
+# Preserve the structure of .env.example while:
+#   - keeping keys that still exist in .env
+#   - replacing their values with empty values
+#   - removing keys no longer present in .env
+while IFS= read -r line || [[ -n "$line" ]]; do
+
+    # Preserve comments and blank lines.
+    if [[ "$line" =~ ^[[:space:]]*# || "$line" =~ ^[[:space:]]*$ ]]; then
+        printf '%s\n' "$line" >> "$tmp"
+        continue
+    fi
+
+    # Match KEY=value / export KEY=value
+    if [[ "$line" =~ ^([[:space:]]*)(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)([[:space:]]*)=(.*)$ ]]; then
+        indent="${BASH_REMATCH[1]}"
+        export_prefix="${BASH_REMATCH[2]}"
+        key="${BASH_REMATCH[3]}"
+        spacing="${BASH_REMATCH[4]}"
+
+        if [[ -n "${keys[$key]+x}" ]]; then
+            printf '%s%s%s%s=\n' \
+                "$indent" \
+                "$export_prefix" \
+                "$key" \
+                "$spacing" >> "$tmp"
+        fi
+
+        continue
+    fi
+
+    # Preserve lines we don't recognize.
+    printf '%s\n' "$line" >> "$tmp"
+
+done < "$EXAMPLE_FILE"
+
+# Add new variables that exist in .env but aren't in .env.example.
+existing_keys="$(
+    sed -nE \
+        -e 's/^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=.*/\2/p' \
+        "$EXAMPLE_FILE" |
+    sort -u
+)"
+
+{
+    printf '\n# Automatically added from %s\n' "$ENV_FILE"
+
+    for key in "${env_keys[@]}"; do
+        if ! grep -qxF "$key" <<< "$existing_keys"; then
+            printf '%s=\n' "$key"
+        fi
+    done
+} >> "$tmp"
+
+mv "$tmp" "$EXAMPLE_FILE"
+
+echo "Synced $EXAMPLE_FILE with $ENV_FILE"
